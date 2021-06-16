@@ -1,66 +1,58 @@
-const mongoose = require('mongoose');
-const { Schema } = mongoose;
-mongoose.connect('mongodb://localhost:27017/test', {useNewUrlParser: true, useUnifiedTopology: true, useFindAndModify: false});
-console.log(true)
-const d1 = new Schema({
-    country:  String,
-    city: String,
-    name:   String,
-    longitude: Number,
-    latitude: Number,
-    location: [],
-    students: [{year: Date, number: Number}]
-
-})
-const d2 = new Schema({
-    country: String,
-    overallStudents: Number,
-    difference: Number
-})
-const d3 = new Schema({
-    country: String,
-    num: Number
-})
-
-const Data1 = mongoose.model('Data1', d1, 'data1');
-const Data2 = mongoose.model('Data2', d2, 'data2');
-const Data3 = mongoose.model('Data3', d3);
-const db = mongoose.connection;
-db.on('error', console.error.bind(console, 'connection error:'));
-db.once('open', function() {
-    async function start() {
-        const all = {}
-        await Data1.find({}, function(err, data) {
-            data.forEach(async (item) => {
-                const ll = item['location'][0]['ll']
-                const sum = item['students'].reduce((a,b)=> {
-                    return a + b['number']
-                },0)
-                all[item['country']] = sum
-                await Data1.findOneAndUpdate({_id: item['_id']},{$set:{ longitude: ll[0], latitude: ll[1]}})
-            })
-        })
-        const alldata = await Data1.find({})
-        const country = {}
-        alldata.forEach(item => {
-            if(country[item['country']]) {
-                country[item['country']] = country[item['country']] + 1
-            }
-            if(!country[item['country']]) {
-                country[item['country']] = 1
-            }
-        })
-        const countryArray =[]
-        for(key in country) {
-            const data = new Data3({country: key, num:country[key]})
-            await data.save()
-        }
-        console.log(countryArray)
-        await Data2.find({}, async function(err, data) {
-            data.forEach(async (item) => {
-                await Data2.findOneAndUpdate({country: item['country']},{difference: all[item['country']] - item['overallStudents']})
-            })
-        })
+const MongoClient = require("mongodb").MongoClient;
+const mongoClient = new MongoClient("mongodb://localhost:27017/", {useUnifiedTopology: true});
+mongoClient.connect(function(err, client){
+    if(err){
+        return console.log(err);
     }
-    start()
+    const db = client.db("test");
+    const collection = db.collection("data1");
+    const secondCollection = db.collection("data2")
+    collection.updateMany({},[{$set:{"longitude": {"$arrayElemAt":["$location.ll",0]},"latitude": {"$arrayElemAt":["$location.ll",1]}}}])
+    collection.aggregate([
+        {"$lookup":{
+          "from": "data2",
+          "localField": "country",
+          "foreignField": "country",
+          "as": "data2"
+        }}
+        ,{
+    $unwind: {path:'$students'}
+    },
+    {
+        $group:
+            {
+                _id: "$_id",
+                'sum': { $sum: { $multiply: [ "$students.number" ] } },
+                'overall':{$addToSet: {"$arrayElemAt":["$data2",0]} }
+            }
+    },
+    {
+        $set: {"overall": {"$arrayElemAt":["$overall",0]}},
+    },{
+        $set: {"overall": "$overall.overallStudents"}
+    },{
+        $addFields : {
+            different : {$subtract: [ "$sum", "$overall" ]}
+        }
+    }
+      ],{ 'allowDiskUse': true}).toArray(function(err, docs) {
+          docs.forEach((item)=> {
+            collection.findOneAndUpdate({_id: item["_id"]},{$set:{'different': item['different']}})
+          })
+        // console.log(JSON.stringify(docs,null,2));
+      });
+
+      collection.aggregate([
+        {$group: {_id:{country : "$country"},count: { $sum: 1 },
+        "allDiffs":{$addToSet:'$different'},
+        "longitudes":{$addToSet:'$longitude'},
+        "latitudes":{$addToSet:'$latitude'}
+        },
+        },
+        {$set:{_id: "$_id.country"}},
+        {$out: "count"}
+      ]).toArray(function(err, docs) {
+    //   console.log(JSON.stringify(docs,null,2));
+    });
+
 });
